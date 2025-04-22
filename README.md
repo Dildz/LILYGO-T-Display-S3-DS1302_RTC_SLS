@@ -38,23 +38,32 @@ This code implements a NTP-synchronized real-time clock with a modern UI created
 - **Temperature Range**: -40°C to 85°C
 
 ## Notes:
-1. **First Run**:
-   - Device will start WiFi configuration portal if no known networks are available
-   - Connect to "T-Display-S3" AP with password: 123456789
-   - Configure WiFi through web interface at 192.168.4.1
+1. **LVGL config**
+  - PlatformIO will automatically download the libraries listed in the **platformio.ini** file when the project is opened for the 1st time
+  - In the **'.pio\libdeps\lilygo-t-display-s3\lvgl'** folder - find & copy **'lv_conf_template.h'** to **'.pio\libdeps\lilygo-t-display-s3'**
+  - Rename **'.pio\libdeps\lilygo-t-display-s3\lv_conf_template.h'** to **'.pio\libdeps\lilygo-t-display-s3\lv_conf.h'**
+  - Open **'.pio\libdeps\lilygo-t-display-s3\lv_conf.h'** and modify the these lines:
+    - Line 15: **#if 0 /*Set it to "1" to enable content*/**    >>  as the comment says - **set it to 1**
+    - Line 364, 365, 366: **#define LV_FONT_MONTSERRAT_8  0**   >>  **set font sizes 8, 10 & 12 to 1**
+    - If any additional fonts are used in the SLS project then you will need to set them to 1 as well
+  
+2. **First Run**:
+  - Device will start WiFi configuration portal if no known networks are available
+  - Connect to **"T-Display-S3"** AP with password: **123456789**
+  - Configure WiFi through web interface at **192.168.4.1**
 
-2. **Normal Operation**:
-   - Time will automatically sync with NTP server on connection
-   - RTC maintains time between syncs
-   - Use buttons to adjust screen brightness:
-     - Left button: Decrease brightness
-     - Right button: Increase brightness
+3. **Normal Operation**:
+  - Time will automatically sync with NTP server on connection
+  - RTC maintains time between syncs
+  - Use buttons to adjust screen brightness:
+    - Left button: Decrease brightness
+    - Right button: Increase brightness
 
-3. **SLS Project Files**:
-   - This repository includes the SquareLine Studio project files in: '...\LILYGO-T-Display-S3-DS1302_RTC_SLS\sls_files'
-   - In the 'sls_files' folder, there are 2 subfolders: 'export' & 'project'
-   - Open SquareLine_Project in the 'project' folder with Squareline Studio to make changes to the UI.
-   - Export project files to the 'export' folder and copy all, then replace all files in the 'src' folder.
-   - **Do not export into the 'src' folder as SLS will erase the folder contents before exporting!**
-   - Clean the PlatformIO project (PlatfomIO: Clean).
-   - Build to check for errors & upload.
+4. **SLS Project Files**:
+  - This repository includes the SquareLine Studio project files in: **'.\LILYGO-T-Display-S3-DS1302_RTC_SLS\sls_files'**
+  - In the **'sls_files'** folder, there are 2 subfolders: **'export'** & **'project'**
+  - Open SquareLine_Project in the **'project'** folder with Squareline Studio to make changes to the UI.
+  - Export project files to the **'export'** folder and copy all, then replace all files in the **'src'** folder.
+  - **Do not export into the 'src' folder as SLS will erase the folder contents before exporting!**
+  - Clean the PlatformIO project (PlatfomIO: Clean).
+  - Build to check for errors & upload.
