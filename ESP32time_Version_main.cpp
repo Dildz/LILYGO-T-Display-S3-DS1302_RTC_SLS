@@ -7,9 +7,7 @@
 #include <ThreeWire.h>
 #include <RtcDS1302.h>
 #include <WiFiManager.h>
-#include <EEPROM.h>
 
-#include "driver/temp_sensor.h"
 #include "LV_Helper.h"
 #include "ui.h"
 #include "pins.h"
@@ -23,24 +21,16 @@
 #define DAT  PIN_GPIO_13
 #define CLK  PIN_GPIO_12
 
-// EEPROM settings
-#define EEPROM_SIZE sizeof(ConfigData)
-#define EEPROM_ADDR 0
 
-// Configuration structure for EEPROM
-typedef struct {
-  long gmtOffset;
-  byte dstOffset;
-  bool EEPROMinitialized; // flag to check if EEPROM has initialized
-} ConfigData;
-ConfigData config;
-
-// Time storage
-struct tm lastLocalTime;
-unsigned long lastTimeUpdate = 0;
+// Startup flag
+bool firstStart = true;
 
 // NTP settings
 const char* ntpServer = "pool.ntp.org";
+//#################### EDIT THIS SECTION ###################
+const long gmtOffset = 2; // adjust for your timezone
+const int dstOffset = 0;  // adjust for daylight saving
+//##########################################################
 
 // Initialize RtcDS1302
 ThreeWire myWire(DAT, CLK, RST); // IO, SCLK, CE
@@ -50,13 +40,19 @@ RtcDS1302<ThreeWire> Rtc(myWire);
 TFT_eSPI lcd = TFT_eSPI();
 
 // Brightness control variables
-byte currentBrightness = 160;   // start at 160
-const byte brightnessStep = 40; // step size
-const byte minBrightness = 80;  // minimum brightness
-const byte maxBrightness = 240; // maximum brightness
+const int brightnessLevels[] = {80, 120, 160, 200, 240}; // brightness levels array
+int currentBrightnessIndex = 2; // start in the middle (160)
+int currentBrightness = brightnessLevels[currentBrightnessIndex]; // initial brightness
 
-// Button debounce delay
-const byte debounceDelay = 20;
+// Button states
+bool lastBootBtnState = HIGH;
+bool lastKeyBtnState = HIGH;
+byte debounceDelay = 20;
+
+// Wi-Fi related variables
+bool wifiConnected = false;
+unsigned long wifiReconnectAttempt = 3; // 3 retries
+const unsigned long wifiReconnectInterval = 10; // 10 seconds
 
 // IP address as a string
 String ipString = "";
@@ -64,6 +60,7 @@ String ipString = "";
 // NTP sync variables
 unsigned long lastNTPSync = 0;
 const unsigned long ntpSyncInterval = 3600000; // 1 hour
+bool ntpSyncSuccess = false;
 
 // NTP sync states
 enum SyncState {
@@ -73,25 +70,10 @@ enum SyncState {
 SyncState rtcSyncState = SYNC_FAILED; // start in failed state until first successful sync
 String lastResponseTime = "NEVER";    // store the last response string
 
-// Frame rate control
-const unsigned long frameInterval = 33; // ~30 FPS (1000ms/30 = 33.33ms per frame)
-unsigned long lastFrameTime = 0;
-
 
 /*************************************************************
 ********************** HELPER FUNCTIONS **********************
 **************************************************************/
-
-// Function to validate timezone inputs
-bool validateTZData(const char* gmtStr, const char* dstStr) {
-  long gmt = atoi(gmtStr);
-  if (gmt < -12 || gmt > 14) return false;
-  
-  byte dst = atoi(dstStr);
-  if (dst != 0 && dst != 1) return false;
-  
-  return true;
-}
 
 // Function to check for a configuration portal trigger (both buttons held for 5 seconds)
 bool configPortalTrigger() {
@@ -116,72 +98,69 @@ bool configPortalTrigger() {
   else {
     bothPressed = false;
   }
-  return false;
-}
-
-// Function to update local time between syncs
-void updateLocalTime() {
-  static unsigned long lastUpdateMillis = 0;
-  unsigned long currentMillis = millis();
-  unsigned long elapsedSeconds = (currentMillis - lastUpdateMillis) / 1000;
   
-  if (elapsedSeconds >= 1) {
-    time_t now = mktime(&lastLocalTime) + elapsedSeconds;
-    localtime_r(&now, &lastLocalTime);
-    lastUpdateMillis = currentMillis;
-  }
+  return false;
 }
 
 // Function to sync RTC with NTP server
 bool syncRTCWithNTP() {
-  configTime(config.gmtOffset * 3600, config.dstOffset * 3600, ntpServer);
+  configTime(gmtOffset * 3600, dstOffset * 3600, ntpServer);
   
-  if (!getLocalTime(&lastLocalTime, 10000)) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 10000)) { // Increased timeout to 10s
+    Serial.println("NTP sync failed - couldn't get local time");
     return false;
   }
 
-  // Store UTC time in RTC
-  RtcDateTime utcTime(
-    lastLocalTime.tm_year + 1900,
-    lastLocalTime.tm_mon + 1,
-    lastLocalTime.tm_mday,
-    lastLocalTime.tm_hour - config.gmtOffset,
-    lastLocalTime.tm_min,
-    lastLocalTime.tm_sec
+  // Validate received time
+  if (timeinfo.tm_year < 120) { // Year 2020 or later
+    Serial.println("NTP sync failed - invalid year received");
+    return false;
+  }
+
+  RtcDateTime ntpTime(
+    timeinfo.tm_year + 1900,
+    timeinfo.tm_mon + 1,
+    timeinfo.tm_mday,
+    timeinfo.tm_hour,
+    timeinfo.tm_min,
+    timeinfo.tm_sec
   );
   
-  Rtc.SetDateTime(utcTime);
+  // SetDateTime doesn't return a value, so we'll assume success if we get here
+  Rtc.SetDateTime(ntpTime);
   
   char syncTimeStr[9];
   snprintf(syncTimeStr, sizeof(syncTimeStr), "%02d:%02d:%02d", 
-           lastLocalTime.tm_hour, lastLocalTime.tm_min, lastLocalTime.tm_sec);
+           timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   lastResponseTime = syncTimeStr;
-  lastTimeUpdate = millis();
-
+  
+  Serial.println("NTP sync successful");
   return true;
 }
 
-// Function to save extra WiFi Manager configs to EEPROM
-void saveConfig() {
-  EEPROM.put(EEPROM_ADDR, config);
-  EEPROM.commit();
+// Get day of week as 3-letter abbreviation
+String getDayOfWeekString() {
+  RtcDateTime now = Rtc.GetDateTime();
+  const char* daysOfWeek[] = {"SUN.", "MON.", "TUE.", "WED.", "THU.", "FRI.", "SAT."};
+  return daysOfWeek[now.DayOfWeek()];
 }
 
-// Function to initialize EEPROM
-void initEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  
-  // Read config from EEPROM
-  EEPROM.get(EEPROM_ADDR, config);
-  
-  // If EEPROM is empty or contains invalid values, initialize with defaults
-  if (!config.EEPROMinitialized || config.gmtOffset < -12 || config.gmtOffset > 14 || 
-      (config.dstOffset != 0 && config.dstOffset != 1)) {
-    config.gmtOffset = 0; // default to UTC
-    config.dstOffset = 0; // default to no DST
-    config.EEPROMinitialized = true;
-    saveConfig();
-  }
+// Get date as a string
+String getDateString() {
+  RtcDateTime now = Rtc.GetDateTime();
+  char buf[11];
+  snprintf(buf, sizeof(buf), "%02d/%02d/%04d",
+           now.Day(), now.Month(), now.Year());
+  return String(buf);
+}
+
+// Get seperate time components
+void getTimeComponents(int &hours, int &minutes, int &seconds) {
+  RtcDateTime now = Rtc.GetDateTime();
+  hours = now.Hour();
+  minutes = now.Minute();
+  seconds = now.Second();
 }
 
 // Function to update time with flashing colon
@@ -192,22 +171,23 @@ void updateTime() {
   
   if (millis() - lastUpdate >= updateInterval) {
     if (Rtc.IsDateTimeValid()) {
-      // Update local time between syncs
-      if (millis() - lastTimeUpdate >= 1000) {
-        updateLocalTime();
-
-        // Update display
-        char hourStr[3], minStr[3], secStr[3];
-        snprintf(hourStr, sizeof(hourStr), "%02d", lastLocalTime.tm_hour);
-        snprintf(minStr, sizeof(minStr), "%02d", lastLocalTime.tm_min);
-        snprintf(secStr, sizeof(secStr), "%02d", lastLocalTime.tm_sec);
-        
-        lv_label_set_text(ui_timeH, hourStr);
-        lv_label_set_text(ui_timeM, minStr);
-        lv_label_set_text(ui_timeS, secStr);
-
-        lastTimeUpdate = millis();
-      }
+      int hours, minutes, seconds;
+      getTimeComponents(hours, minutes, seconds);
+      
+      // Update hour label (always visible)
+      char hourStr[3];
+      snprintf(hourStr, sizeof(hourStr), "%02d", hours);
+      lv_label_set_text(ui_timeH, hourStr);
+      
+      // Update minute label (always visible)
+      char minStr[3];
+      snprintf(minStr, sizeof(minStr), "%02d", minutes);
+      lv_label_set_text(ui_timeM, minStr);
+      
+      // Update second label (always visible)
+      char secStr[3];
+      snprintf(secStr, sizeof(secStr), "%02d", seconds);
+      lv_label_set_text(ui_timeS, secStr);
       
       // Toggle colon visibility
       colonVisible = !colonVisible;
@@ -227,35 +207,47 @@ void updateTime() {
 // Function to update date labels
 void updateDate() {
   static unsigned long lastDateUpdate = 0;
-  
-  if (millis() - lastDateUpdate >= 1000) {
-    const char* daysOfWeek[] = {"SUN.", "MON.", "TUE.", "WED.", "THU.", "FRI.", "SAT."};
-    lv_label_set_text(ui_day, daysOfWeek[lastLocalTime.tm_wday]);
-    
-    char dateStr[11];
-    snprintf(dateStr, sizeof(dateStr), "%02d-%02d-%04d",
-             lastLocalTime.tm_mday, lastLocalTime.tm_mon + 1, lastLocalTime.tm_year + 1900);
-    lv_label_set_text(ui_date, dateStr);
-    
-    lastDateUpdate = millis();
-  }
-}
+  const unsigned long dateUpdateInterval = 1000; // update date once per sec
 
-// Function to update CPU temperature
-void updateCPUTemp() {
-  static unsigned long lastTempUpdate = 0;
-  const unsigned long tempUpdateInterval = 1000; // update every second
+  // Upadate immediatly on startup
+  if (firstStart) {
+    if (Rtc.IsDateTimeValid()) {
+      RtcDateTime now = Rtc.GetDateTime();
+      
+      // Update day of week label
+      lv_label_set_text(ui_day, getDayOfWeekString().c_str());
+      
+      // Update date label (format: dd mm yyyy)
+      char dateStr[11];
+      snprintf(dateStr, sizeof(dateStr), "%02d-%02d-%04d", now.Day(), now.Month(), now.Year());
+      lv_label_set_text(ui_date, dateStr);
+    }
+    else {
+      lv_label_set_text(ui_day, "DAY.");
+      lv_label_set_text(ui_date, "DD-MM-YYYY");
+    }
+    lastDateUpdate = millis();
+    firstStart = false;
+  }
   
-  if (millis() - lastTempUpdate >= tempUpdateInterval) {
-      float temp = 0;
-      temp_sensor_read_celsius(&temp);
+  // Update every 1min
+  if (millis() - lastDateUpdate >= dateUpdateInterval) {
+    if (Rtc.IsDateTimeValid()) {
+      RtcDateTime now = Rtc.GetDateTime();
       
-      // Format as "XX °C"
-      char tempStr[10];
-      snprintf(tempStr, sizeof(tempStr), "%02d C", (int)round(temp));
-      lv_label_set_text(ui_CPUtemp, tempStr);
+      // Update day of week label
+      lv_label_set_text(ui_day, getDayOfWeekString().c_str());
       
-      lastTempUpdate = millis();
+      // Update date label (format: dd mm yyyy)
+      char dateStr[11];
+      snprintf(dateStr, sizeof(dateStr), "%02d-%02d-%04d", now.Day(), now.Month(), now.Year());
+      lv_label_set_text(ui_date, dateStr);
+    }
+    else {
+      lv_label_set_text(ui_day, "DAY.");
+      lv_label_set_text(ui_date, "DD-MM-YYYY");
+    }
+    lastDateUpdate = millis();
   }
 }
 
@@ -340,32 +332,36 @@ void checkButtons() {
   bool bootBtnState = digitalRead(bootBTN);
   bool keyBtnState = digitalRead(keyBTN);
 
-  // Debounce check
-  if (millis() - lastDebounceTime > debounceDelay) {
-    // Boot button pressed (falling edge)
-    if (bootBtnState == LOW && lastBootBtnState == HIGH) {
-      if (currentBrightness > minBrightness) { // only decrease if not at minimum
-        currentBrightness -= brightnessStep;
+  // Check for button press (falling edge detection)
+  if ((bootBtnState == LOW && lastBootBtnState == HIGH) || 
+      (keyBtnState == LOW && lastKeyBtnState == HIGH)) {
+    if (millis() - lastDebounceTime > debounceDelay) {
+      // Boot button pressed - decrease brightness
+      if (bootBtnState == LOW) {
+        if (currentBrightnessIndex > 0) { // only decrease if not at minimum
+          currentBrightnessIndex--;
+          currentBrightness = brightnessLevels[currentBrightnessIndex];
+          analogWrite(PIN_LCD_BL, currentBrightness);
+        }
       }
-      analogWrite(PIN_LCD_BL, currentBrightness);
-    }
-
-    // Key button pressed (falling edge)
-    if (keyBtnState == LOW && lastKeyBtnState == HIGH) {
-      if (currentBrightness < maxBrightness) { // only increase if not at maximum
-        currentBrightness += brightnessStep;
+      
+      // Key button pressed - increase brightness
+      if (keyBtnState == LOW) {
+        if (currentBrightnessIndex < (sizeof(brightnessLevels)/sizeof(brightnessLevels[0]) - 1)) { // only increase if not at maximum
+          currentBrightnessIndex++;
+          currentBrightness = brightnessLevels[currentBrightnessIndex];
+          analogWrite(PIN_LCD_BL, currentBrightness);
+        }
       }
-      analogWrite(PIN_LCD_BL, currentBrightness);
+      lastDebounceTime = millis();
     }
-
-    lastDebounceTime = millis();
   }
 
   // Update last button states
   lastBootBtnState = bootBtnState;
   lastKeyBtnState = keyBtnState;
 
-  // Update brightness bar value
+  // Update brighness bar value
   lv_bar_set_value(ui_brightnessBar, currentBrightness, LV_ANIM_ON);
 }
 
@@ -374,53 +370,30 @@ void startConfigPortal() {
   // Clear the screen and display instructions
   lcd.fillScreen(TFT_BLACK);
   lcd.setTextColor(0x7BCF, TFT_BLACK); // converted from #787878
-  lcd.setCursor(0, 0);
   
-  lcd.println("Entered Wi-Fi Configuration Mode\n\n");
+  lcd.println("WiFi Configuration Mode\n\n");
   lcd.println("A Wi-Fi network has been created:\n");
   lcd.println("SSID:     T-Display-S3\n");
   lcd.println("Password: 123456789\n\n");
   lcd.println("Connect and navigate to: 192.168.4.1\n");
   lcd.println("in a browser to setup your Wi-Fi.\n\n");
 
-  // Create WiFiManager instance with custom parameters
+  // Create WiFiManager instance
   WiFiManager wifiManager;
-
-  // Create buffers initialized with "0"
-  char gmtValue[4] = "0";
-  char dstValue[2] = "0";
-
-  // Only overwrite if we have valid values
-  if (config.EEPROMinitialized) {
-    snprintf(gmtValue, sizeof(gmtValue), "%ld", config.gmtOffset);
-    snprintf(dstValue, sizeof(dstValue), "%d", config.dstOffset);
-  }
-
-  // Add custom parameters for GMT and DST offsets
-  WiFiManagerParameter custom_gmt("gmt", "GMT Offset (-12 to +14)", gmtValue, 3);
-  WiFiManagerParameter custom_dst("dst", "DST Offset (0 or 1)", dstValue, 1);
-  wifiManager.addParameter(&custom_gmt);
-  wifiManager.addParameter(&custom_dst);
-  
   wifiManager.setConnectTimeout(30);
   wifiManager.setConfigPortalTimeout(0);
   
+  // Start config portal
   if (!wifiManager.startConfigPortal("T-Display-S3", "123456789")) {
     lcd.println("Failed to connect, rebooting...\n");
     delay(3000);
   }
   else {
-    // Validate and save new parameters
-    if (validateTZData(custom_gmt.getValue(), custom_dst.getValue())) {
-      config.gmtOffset = atoi(custom_gmt.getValue());
-      config.dstOffset = atoi(custom_dst.getValue());
-      saveConfig();
-    }
-    
     lcd.println("Configuration saved, rebooting...");
     delay(2000);
-    ESP.restart();
   }
+
+  ESP.restart();
 }
 
 
@@ -430,58 +403,33 @@ void startConfigPortal() {
 
 // SETUP
 void setup() {
-  // Initialize hardware
-  pinMode(bootBTN, INPUT_PULLUP);   // BOOT button
-  pinMode(keyBTN, INPUT_PULLUP);    // KEY button
-  pinMode(PIN_POWER_ON, OUTPUT);    // display power pin
-  digitalWrite(PIN_POWER_ON, HIGH); // turn on display
+  // Initialize buttons pins
+  pinMode(bootBTN, INPUT_PULLUP);
+  pinMode(keyBTN, INPUT_PULLUP);
 
-  // Initialize EEPROM
-  initEEPROM();
-  
-  // Initialize temperature sensor
-  temp_sensor_config_t temp_sensor = TSENS_CONFIG_DEFAULT();
-  temp_sensor.dac_offset = TSENS_DAC_L2; // L4(-40°C ~ 20°C), L2(-10°C ~ 80°C), L1(20°C ~ 100°C), L0(50°C ~ 125°C)
-  temp_sensor_set_config(temp_sensor);
-  temp_sensor_start();
+  // Initialize display pins
+  pinMode(PIN_POWER_ON, OUTPUT);
+  digitalWrite(PIN_POWER_ON, HIGH);
 
   // Initialize display
   lcd.init();
-  lcd.setRotation(1);                         // landscape
-  ledcSetup(0, 5000, 8);                      // 5kHz PWM, 8-bit resolution
-  analogWrite(PIN_LCD_BL, LOW);               // start with backlight OFF
-  lcd.fillScreen(TFT_BLACK);                  // clear screen
-  lcd.setTextColor(0x7BCF, TFT_BLACK);        // converted from #787878
-  analogWrite(PIN_LCD_BL, currentBrightness); // display brightness (160/255)
+  lcd.setRotation(1);                  // landscape
+  ledcSetup(0, 10000, 8);              // 10kHz PWM frequency
+  analogWrite(PIN_LCD_BL, 100);        // display brightness (100/255)
+  lcd.fillScreen(TFT_BLACK);           // clear screen
+  lcd.setTextColor(0x7BCF, TFT_BLACK); // converted from #787878
 
   // Display initial message
-  lcd.println("\nConnecting to Wi-Fi - please wait...(up to 30s)\n");
+  lcd.println("\nConnecting to Wi-Fi - please wait...\n");
 
-  // Initialize WiFiManager with parameters
+  // Create an instance of WiFiManager
   WiFiManager wifiManager;
-
-  char gmtValue[6] = "0";  // Default to "0" if EEPROM not initialized
-  char dstValue[2] = "0";  // Default to "0" if EEPROM not initialized
-
-  if (config.EEPROMinitialized) {
-      snprintf(gmtValue, sizeof(gmtValue), "%ld", config.gmtOffset);
-      snprintf(dstValue, sizeof(dstValue), "%d", config.dstOffset);
-  }
-
-  WiFiManagerParameter custom_gmt("gmt", "GMT Offset (-12 to +14)", gmtValue, 3);
-  WiFiManagerParameter custom_dst("dst", "DST Offset (0 or 1)", dstValue, 1);
-  wifiManager.addParameter(&custom_gmt);
-  wifiManager.addParameter(&custom_dst);
-
-  wifiManager.setHostname("LILYGO-T-Display-S3");
   wifiManager.setConnectTimeout(10);
   wifiManager.setConnectRetries(3);
   wifiManager.setConfigPortalTimeout(0);
   
   // Callback for config portal
   wifiManager.setAPCallback([](WiFiManager *wm) {
-    lcd.fillScreen(TFT_BLACK);
-    lcd.setCursor(0, 0);
     lcd.println("AP unreachable or not yet configured.\n\n");
     lcd.println("A Wi-Fi network has been created:\n");
     lcd.println("SSID:     T-Display-S3\n");
@@ -500,18 +448,6 @@ void setup() {
   // This will block until connected to saved network or after config
   wifiManager.autoConnect("T-Display-S3", "123456789");
 
-  // After connection, check if we need to update the offsets
-  if (validateTZData(custom_gmt.getValue(), custom_dst.getValue())) {
-    long newGmt = atoi(custom_gmt.getValue());
-    byte newDst = atoi(custom_dst.getValue());
-    
-    if (newGmt != config.gmtOffset || newDst != config.dstOffset) {
-      config.gmtOffset = newGmt;
-      config.dstOffset = newDst;
-      saveConfig();
-    }
-  }
-
   // Wi-Fi connected :)
   lcd.println("WiFi Connected! :)\n");
   lcd.print("SSID: ");
@@ -519,7 +455,7 @@ void setup() {
   lcd.print("IP: ");
   lcd.println(WiFi.localIP());
   ipString = (WiFi.localIP().toString()); // update IP address string
-  delay(1000);
+  delay(2000);
 
   // Initialize RTC
   Rtc.Begin();
@@ -553,8 +489,8 @@ void setup() {
   lcd.println("Attempting initial NTP sync...\n");
 
   bool syncSuccess = false;
-  byte retryCount = 0;
-  const byte maxRetries = 3;
+  int retryCount = 0;
+  const int maxRetries = 3;
 
   while (!syncSuccess && retryCount < maxRetries) {
     lcd.printf("Attempt %d of %d\n", retryCount + 1, maxRetries);
@@ -564,8 +500,7 @@ void setup() {
       rtcSyncState = SYNC_SUCCESS;
       lcd.println("NTP sync successful!\n");
       lastNTPSync = millis();
-    }
-    else {
+    } else {
       retryCount++;
       delay(5000); // 5sec retry delay
     }
@@ -581,60 +516,38 @@ void setup() {
     RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
     Rtc.SetDateTime(compiled);
   }
-  delay(1000);
+  delay(2000);
 
   lcd.println("Starting main display...");
   delay(2000);
+  lcd.fillScreen(TFT_BLACK);
 
-  // Initialize lvgl UI
+  // Initialize hardware
   lv_helper();
   ui_init();
-
-  // Update GMT label
-  char gmtLabel[4];
-  snprintf(gmtLabel, sizeof(gmtLabel), "%+ld", config.gmtOffset);
-  lv_label_set_text(ui_GMT, gmtLabel);
-  
-  // Update DST label
-  const char* dstLabel = (config.dstOffset == 1) ? "ON" : "OFF";
-  lv_label_set_text(ui_DST, dstLabel);
 
   // Update IP address label
   lv_label_set_text(ui_IPadd, ipString.c_str());
 
   // Update sync status labels
   if (rtcSyncState == SYNC_SUCCESS) {
-    lv_obj_clear_flag(ui_rtcSynced, LV_OBJ_FLAG_HIDDEN); // show SYNCED
-    lv_obj_add_flag(ui_rtcFailed, LV_OBJ_FLAG_HIDDEN);   // hide FAILED
+    lv_obj_clear_flag(ui_rtcSynced, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_rtcFailed, LV_OBJ_FLAG_HIDDEN);
   }
   else {
-    lv_obj_add_flag(ui_rtcSynced, LV_OBJ_FLAG_HIDDEN);   // hide SYNCED
-    lv_obj_clear_flag(ui_rtcFailed, LV_OBJ_FLAG_HIDDEN); // show FAILED
+    lv_obj_add_flag(ui_rtcSynced, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(ui_rtcFailed, LV_OBJ_FLAG_HIDDEN);
   }
   lv_label_set_text(ui_lastSyncTime, lastResponseTime.c_str());
-
-  // Update FPS label (fixed value since we limit the FPS to 30 in main loop)
-  lv_label_set_text(ui_FPS, "30");
 }
 
 // MAIN LOOP
 void loop() {
-  // Frame rate limiter
-  unsigned long currentTime = millis();
-  unsigned long elapsed = currentTime - lastFrameTime;
-  
-  // Calculate how much time we need to delay to maintain 30 FPS
-  if (elapsed < frameInterval) {
-    unsigned long waitTime = frameInterval - elapsed;
-    delay(waitTime);
-  }
-  lastFrameTime = millis();
-
   // Check for simultaneous button press (config portal trigger)
   if (configPortalTrigger()) {
     startConfigPortal();
+    /* This function will reboot, so we won't return here */
   }
-  
   lv_task_handler();
 
   checkButtons();
@@ -642,7 +555,6 @@ void loop() {
   
   updateTime();
   updateDate();
-  updateCPUTemp();
-
-  lv_refr_now(NULL);
+  
+  lv_refr_now(NULL); // force refresh
 }

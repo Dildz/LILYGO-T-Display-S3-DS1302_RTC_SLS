@@ -32,6 +32,10 @@ extern lv_obj_t * ui_headerPanel;
 extern lv_obj_t * ui_deviceNameLabel;
 extern lv_obj_t * ui_wifiImage;
 extern lv_obj_t * ui_timedateBGPanel;
+extern lv_obj_t * ui_GMTLabel;
+extern lv_obj_t * ui_GMT;
+extern lv_obj_t * ui_DSTLabel;
+extern lv_obj_t * ui_DST;
 extern lv_obj_t * ui_timeH;
 extern lv_obj_t * ui_timeColon;
 extern lv_obj_t * ui_timeM;
@@ -52,6 +56,10 @@ extern lv_obj_t * ui_rtcSynced;
 extern lv_obj_t * ui_rtcFailed;
 extern lv_obj_t * ui_lastSyncTimeLabel;
 extern lv_obj_t * ui_lastSyncTime;
+extern lv_obj_t * ui_FPSLabel;
+extern lv_obj_t * ui_FPS;
+extern lv_obj_t * ui_CPUtempLabel;
+extern lv_obj_t * ui_CPUtemp;
 // CUSTOM VARIABLES
 
 // EVENTS
@@ -64,6 +72,7 @@ LV_IMG_DECLARE(ui_img_472354705);    // assets/wifi-24px.png
 LV_IMG_DECLARE(ui_img_901948647);    // assets/brightness-adjust-24px.png
 
 // FONTS
+LV_FONT_DECLARE(ui_font_14segment10);
 LV_FONT_DECLARE(ui_font_14segment18);
 LV_FONT_DECLARE(ui_font_7segment18);
 LV_FONT_DECLARE(ui_font_7segment36);

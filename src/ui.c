@@ -15,6 +15,10 @@ lv_obj_t * ui_headerPanel;
 lv_obj_t * ui_deviceNameLabel;
 lv_obj_t * ui_wifiImage;
 lv_obj_t * ui_timedateBGPanel;
+lv_obj_t * ui_GMTLabel;
+lv_obj_t * ui_GMT;
+lv_obj_t * ui_DSTLabel;
+lv_obj_t * ui_DST;
 lv_obj_t * ui_timeH;
 lv_obj_t * ui_timeColon;
 lv_obj_t * ui_timeM;
@@ -35,6 +39,10 @@ lv_obj_t * ui_rtcSynced;
 lv_obj_t * ui_rtcFailed;
 lv_obj_t * ui_lastSyncTimeLabel;
 lv_obj_t * ui_lastSyncTime;
+lv_obj_t * ui_FPSLabel;
+lv_obj_t * ui_FPS;
+lv_obj_t * ui_CPUtempLabel;
+lv_obj_t * ui_CPUtemp;
 // CUSTOM VARIABLES
 
 // EVENTS
